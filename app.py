@@ -1,32 +1,35 @@
 import streamlit as st
-import fitz  # PyMuPDF for PDF reading
+import fitz
 import re
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import pipeline, BartForConditionalGeneration, BartTokenizer
-import torch
 
-# --- Configuration --- #
+# --- App Configuration --- #
 st.set_page_config(page_title="PDF Insight Extractor", layout="wide")
 st.title("PDF Insight Extractor")
 
 st.sidebar.title("Controls")
 
-# --- PDF Processing Functions --- #
+# --- PDF Processing --- #
 @st.cache_data
 def load_and_clean_pdf(pdf_file):
+
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+
     text = ""
     for page in doc:
         text += page.get_text()
 
     cleaned_text = re.sub(r'\s+', ' ', text).strip()
+
     return cleaned_text
 
 
 @st.cache_data
 def chunk_text(text, chunk_size=500):
+
     words = text.split()
     chunks = []
 
@@ -37,29 +40,32 @@ def chunk_text(text, chunk_size=500):
     return chunks
 
 
-# --- Model Loading (Cached) --- #
+# --- Load Models --- #
 @st.cache_resource
 def load_embedding_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 
 @st.cache_resource
 def load_summarization_models():
+
     tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
     model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
+
     return tokenizer, model
 
 
 @st.cache_resource
-def load_qa_pipeline():
+def load_generation_pipeline():
+
     return pipeline(
-        task="document-question-answering",
-        model="deepset/minilm-uncased-squad2",
+        task="text-generation",
+        model="google/flan-t5-base",
         device=-1
     )
 
 
-# --- Core Logic Functions --- #
+# --- Core Functions --- #
 def generate_embeddings_and_index(text_chunks, model):
 
     embeddings = model.encode(
@@ -68,7 +74,8 @@ def generate_embeddings_and_index(text_chunks, model):
         show_progress_bar=False
     )
 
-    embeddings = np.array(embeddings).astype('float32')
+    embeddings = np.array(embeddings).astype("float32")
+
     dimension = embeddings.shape[1]
 
     index = faiss.IndexFlatL2(dimension)
@@ -77,7 +84,7 @@ def generate_embeddings_and_index(text_chunks, model):
     return embeddings, index
 
 
-def generate_summary(text, tokenizer, model, max_length=150, min_length=30):
+def generate_summary(text, tokenizer, model):
 
     inputs = tokenizer(
         [text],
@@ -89,57 +96,67 @@ def generate_summary(text, tokenizer, model, max_length=150, min_length=30):
     summary_ids = model.generate(
         inputs["input_ids"],
         num_beams=4,
-        max_length=max_length,
-        min_length=min_length,
+        max_length=150,
+        min_length=30,
         early_stopping=True,
         forced_bos_token_id=0
     )
 
     return tokenizer.decode(
         summary_ids[0],
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
+        skip_special_tokens=True
     )
 
 
-def semantic_search(query, embedding_model, faiss_index, text_chunks, k=3):
+def semantic_search(query, embedding_model, faiss_index, text_chunks, k=5):
 
     query_embedding = embedding_model.encode([query])
-    query_embedding = np.array(query_embedding).astype('float32')
+
+    query_embedding = np.array(query_embedding).astype("float32")
 
     distances, indices = faiss_index.search(query_embedding, k)
 
     return [text_chunks[i] for i in indices[0]]
 
 
-def answer_question(question, context, qa_pipeline):
+def answer_question(question, context, generator):
 
-    result = qa_pipeline(
-        question=question,
-        context=context
-    )
+    prompt = f"""
+    Answer the question using ONLY the context below.
 
-    return result['answer'], result['score']
+    Context:
+    {context}
+
+    Question:
+    {question}
+
+    Answer:
+    """
+
+    result = generator(prompt, max_new_tokens=120)
+
+    answer = result[0]["generated_text"].split("Answer:")[-1].strip()
+
+    return answer
 
 
 # --- Streamlit UI --- #
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload your PDF file",
+    "Upload a PDF",
     type=["pdf"]
 )
 
-if uploaded_file is not None:
+if uploaded_file:
 
     st.success("PDF uploaded successfully!")
 
-    # Load models
     embedding_model = load_embedding_model()
     sum_tokenizer, sum_model = load_summarization_models()
-    qa_pipe = load_qa_pipeline()
+    generator = load_generation_pipeline()
 
-    # Process PDF only once
-    if "processed_data" not in st.session_state or st.session_state.uploaded_file_name != uploaded_file.name:
+    if "processed_data" not in st.session_state or \
+       st.session_state.get("uploaded_file_name") != uploaded_file.name:
 
         with st.spinner("Processing PDF..."):
 
@@ -147,70 +164,64 @@ if uploaded_file is not None:
 
             text_chunks = chunk_text(raw_text)
 
-            st.write(f"Extracted {len(text_chunks)} text chunks from the PDF.")
+            st.write(f"Extracted {len(text_chunks)} chunks")
 
             embeddings, faiss_index = generate_embeddings_and_index(
                 text_chunks,
                 embedding_model
             )
 
-            st.write(f"Created FAISS index with {faiss_index.ntotal} vectors.")
+            st.write(f"FAISS index created with {faiss_index.ntotal} vectors")
 
-            # Improved summary using first 3 chunks
-            summary_text = generate_summary(
+            summary = generate_summary(
                 " ".join(text_chunks[:3]),
                 sum_tokenizer,
                 sum_model
             )
 
             st.session_state.processed_data = {
-                "raw_text": raw_text,
                 "text_chunks": text_chunks,
-                "embeddings": embeddings,
                 "faiss_index": faiss_index,
-                "summary_text": summary_text
+                "summary": summary
             }
 
             st.session_state.uploaded_file_name = uploaded_file.name
 
     processed_data = st.session_state.processed_data
 
-    # --- Display Summary --- #
+    # --- Summary --- #
     st.subheader("Document Summary")
-    st.write(processed_data["summary_text"])
+    st.write(processed_data["summary"])
 
     # --- Question Answering --- #
-    st.subheader("Question Answering")
+    st.subheader("Ask Questions")
 
-    question = st.text_input(
-        "Ask a question about the document:"
-    )
+    question = st.text_input("Ask something about the document")
 
     if question:
 
-        with st.spinner("Searching for relevant context and answering..."):
+        with st.spinner("Searching and generating answer..."):
 
             retrieved_chunks = semantic_search(
                 question,
                 embedding_model,
                 processed_data["faiss_index"],
-                processed_data["text_chunks"],
-                k=5
+                processed_data["text_chunks"]
             )
 
             context = " ".join(retrieved_chunks)
 
-            answer, confidence = answer_question(
+            answer = answer_question(
                 question,
                 context,
-                qa_pipe
+                generator
             )
 
-            st.write(f"**Answer:** {answer}")
-            st.write(f"**Confidence:** {confidence:.2f}")
+            st.write("### Answer")
+            st.write(answer)
 
             with st.expander("Show retrieved context"):
                 st.write(context)
 
 else:
-    st.info("Please upload a PDF file using the sidebar to get started.")
+    st.info("Upload a PDF from the sidebar to begin.")
