@@ -1,7 +1,7 @@
 streamlit
 PyMuPDF
 sentence-transformers
+faiss-cpu
+numpy
 transformers
 torch
-numpy
-faiss-cpu
