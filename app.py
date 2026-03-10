@@ -6,41 +6,33 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import pipeline, BartForConditionalGeneration, BartTokenizer
 
-# --- App Configuration --- #
+# ------------------- APP CONFIG ------------------- #
 st.set_page_config(page_title="PDF Insight Extractor", layout="wide")
 st.title("PDF Insight Extractor")
-
 st.sidebar.title("Controls")
 
-# --- PDF Processing --- #
+# ------------------- PDF PROCESSING ------------------- #
 @st.cache_data
 def load_and_clean_pdf(pdf_file):
-
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-
     text = ""
     for page in doc:
         text += page.get_text()
-
     cleaned_text = re.sub(r'\s+', ' ', text).strip()
-
     return cleaned_text
 
 
 @st.cache_data
 def chunk_text(text, chunk_size=500):
-
     words = text.split()
     chunks = []
-
     for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i+chunk_size])
+        chunk = " ".join(words[i:i + chunk_size])
         chunks.append(chunk)
-
     return chunks
 
 
-# --- Load Models --- #
+# ------------------- MODEL LOADING ------------------- #
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -48,36 +40,30 @@ def load_embedding_model():
 
 @st.cache_resource
 def load_summarization_models():
-
     tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
     model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn")
-
     return tokenizer, model
 
 
 @st.cache_resource
 def load_generation_pipeline():
-
     return pipeline(
-        task="text-generation",
+        task="text2text-generation",
         model="google/flan-t5-base",
         device=-1
     )
 
 
-# --- Core Functions --- #
+# ------------------- CORE FUNCTIONS ------------------- #
 def generate_embeddings_and_index(text_chunks, model):
-
     embeddings = model.encode(
         text_chunks,
         convert_to_numpy=True,
         show_progress_bar=False
     )
-
     embeddings = np.array(embeddings).astype("float32")
 
     dimension = embeddings.shape[1]
-
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
 
@@ -85,7 +71,6 @@ def generate_embeddings_and_index(text_chunks, model):
 
 
 def generate_summary(text, tokenizer, model):
-
     inputs = tokenizer(
         [text],
         max_length=1024,
@@ -102,50 +87,40 @@ def generate_summary(text, tokenizer, model):
         forced_bos_token_id=0
     )
 
-    return tokenizer.decode(
-        summary_ids[0],
-        skip_special_tokens=True
-    )
+    return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
 
 def semantic_search(query, embedding_model, faiss_index, text_chunks, k=5):
-
     query_embedding = embedding_model.encode([query])
-
     query_embedding = np.array(query_embedding).astype("float32")
 
     distances, indices = faiss_index.search(query_embedding, k)
-
     return [text_chunks[i] for i in indices[0]]
 
 
 def answer_question(question, context, generator):
+    context = context[:1500]
 
     prompt = f"""
-    Answer the question using ONLY the context below.
+Answer the question using only the context below.
 
-    Context:
-    {context}
+Context:
+{context}
 
-    Question:
-    {question}
+Question:
+{question}
 
-    Answer:
-    """
+Answer:
+"""
 
     result = generator(prompt, max_new_tokens=120)
-
-    answer = result[0]["generated_text"].split("Answer:")[-1].strip()
+    answer = result[0]["generated_text"]
 
     return answer
 
 
-# --- Streamlit UI --- #
-
-uploaded_file = st.sidebar.file_uploader(
-    "Upload a PDF",
-    type=["pdf"]
-)
+# ------------------- STREAMLIT UI ------------------- #
+uploaded_file = st.sidebar.file_uploader("Upload a PDF file", type=["pdf"])
 
 if uploaded_file:
 
@@ -161,17 +136,16 @@ if uploaded_file:
         with st.spinner("Processing PDF..."):
 
             raw_text = load_and_clean_pdf(uploaded_file)
-
             text_chunks = chunk_text(raw_text)
 
-            st.write(f"Extracted {len(text_chunks)} chunks")
+            st.write(f"Extracted {len(text_chunks)} text chunks.")
 
             embeddings, faiss_index = generate_embeddings_and_index(
                 text_chunks,
                 embedding_model
             )
 
-            st.write(f"FAISS index created with {faiss_index.ntotal} vectors")
+            st.write(f"FAISS index created with {faiss_index.ntotal} vectors.")
 
             summary = generate_summary(
                 " ".join(text_chunks[:3]),
@@ -189,14 +163,13 @@ if uploaded_file:
 
     processed_data = st.session_state.processed_data
 
-    # --- Summary --- #
+    # -------- Summary -------- #
     st.subheader("Document Summary")
     st.write(processed_data["summary"])
 
-    # --- Question Answering --- #
-    st.subheader("Ask Questions")
-
-    question = st.text_input("Ask something about the document")
+    # -------- Question Answering -------- #
+    st.subheader("Ask Questions About the Document")
+    question = st.text_input("Enter your question")
 
     if question:
 
