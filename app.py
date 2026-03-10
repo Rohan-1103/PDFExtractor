@@ -6,26 +6,32 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import pipeline
 
+# ---------------- APP CONFIG ---------------- #
+
 st.set_page_config(page_title="PDF Insight Extractor", layout="wide")
 st.title("PDF Insight Extractor")
 
-# ---------------- PDF PROCESSING ---------------- #
+st.sidebar.header("Upload Document")
+
+# ---------------- LOAD PDF ---------------- #
 
 @st.cache_data
-def load_and_clean_pdf(pdf_file):
+def load_pdf(pdf_file):
 
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
 
     text = ""
+
     for page in doc:
         text += page.get_text()
 
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\s+", " ", text)
 
     return text
 
 
-@st.cache_data
+# ---------------- TEXT CHUNKING ---------------- #
+
 def chunk_text(text, chunk_size=500):
 
     words = text.split()
@@ -33,7 +39,10 @@ def chunk_text(text, chunk_size=500):
     chunks = []
 
     for i in range(0, len(words), chunk_size):
-        chunks.append(" ".join(words[i:i+chunk_size]))
+
+        chunk = " ".join(words[i:i+chunk_size])
+
+        chunks.append(chunk)
 
     return chunks
 
@@ -42,27 +51,27 @@ def chunk_text(text, chunk_size=500):
 
 @st.cache_resource
 def load_embedding_model():
+
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 
 @st.cache_resource
 def load_llm():
-    return pipeline(
+
+    generator = pipeline(
         "text-generation",
         model="google/flan-t5-base",
         device=-1
     )
 
+    return generator
+
 
 # ---------------- VECTOR INDEX ---------------- #
 
-def generate_embeddings(text_chunks, model):
+def create_faiss_index(chunks, model):
 
-    embeddings = model.encode(
-        text_chunks,
-        convert_to_numpy=True,
-        show_progress_bar=False
-    )
+    embeddings = model.encode(chunks, convert_to_numpy=True)
 
     embeddings = np.array(embeddings).astype("float32")
 
@@ -75,7 +84,7 @@ def generate_embeddings(text_chunks, model):
     return index
 
 
-# ---------------- SEARCH ---------------- #
+# ---------------- SEMANTIC SEARCH ---------------- #
 
 def semantic_search(query, model, index, chunks, k=5):
 
@@ -88,20 +97,25 @@ def semantic_search(query, model, index, chunks, k=5):
     return [chunks[i] for i in indices[0]]
 
 
-# ---------------- LLM TASKS ---------------- #
+# ---------------- SUMMARY ---------------- #
 
-def generate_summary(text, llm):
+def summarize_document(text, llm):
 
     prompt = f"""
-Summarize the following document:
+Summarize the following document in 5 bullet points.
 
+Document:
 {text[:2000]}
+
+Summary:
 """
 
-    result = llm(prompt, max_new_tokens=120)
+    result = llm(prompt, max_new_tokens=150)
 
     return result[0]["generated_text"]
 
+
+# ---------------- QUESTION ANSWERING ---------------- #
 
 def answer_question(question, context, llm):
 
@@ -117,7 +131,7 @@ Question:
 Answer:
 """
 
-    result = llm(prompt, max_new_tokens=120)
+    result = llm(prompt, max_new_tokens=150)
 
     return result[0]["generated_text"]
 
@@ -131,17 +145,17 @@ if uploaded_file:
     embedding_model = load_embedding_model()
     llm = load_llm()
 
-    if "data" not in st.session_state:
+    if "data" not in st.session_state or st.session_state.get("file") != uploaded_file.name:
 
         with st.spinner("Processing PDF..."):
 
-            text = load_and_clean_pdf(uploaded_file)
+            text = load_pdf(uploaded_file)
 
             chunks = chunk_text(text)
 
-            index = generate_embeddings(chunks, embedding_model)
+            index = create_faiss_index(chunks, embedding_model)
 
-            summary = generate_summary(text, llm)
+            summary = summarize_document(text, llm)
 
             st.session_state.data = {
                 "chunks": chunks,
@@ -149,13 +163,19 @@ if uploaded_file:
                 "summary": summary
             }
 
+            st.session_state.file = uploaded_file.name
+
     data = st.session_state.data
+
+    # -------- SUMMARY -------- #
 
     st.subheader("Document Summary")
 
     st.write(data["summary"])
 
-    st.subheader("Ask Questions")
+    # -------- Q&A -------- #
+
+    st.subheader("Ask Questions About the Document")
 
     question = st.text_input("Enter your question")
 
@@ -173,7 +193,12 @@ if uploaded_file:
         answer = answer_question(question, context, llm)
 
         st.write("### Answer")
+
         st.write(answer)
 
         with st.expander("Context used"):
             st.write(context)
+
+else:
+
+    st.info("Upload a PDF to start analysis.")
