@@ -53,7 +53,7 @@ def load_summarization_models():
 @st.cache_resource
 def load_qa_pipeline():
     return pipeline(
-        task="documnet-question-answering",
+        task="document-question-answering",
         model="deepset/minilm-uncased-squad2",
         device=-1
     )
